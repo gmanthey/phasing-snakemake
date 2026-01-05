@@ -1,0 +1,81 @@
+import os
+import pandas as pd
+
+localrules: all, chromosome_vcf
+configfile: "config.yml"
+
+def get_individuals():
+    populations = {}
+    with open(config['populations_file']) as f:
+        for line in f:
+            pop, ind = line.strip().split()
+            if pop not in populations:
+                populations[pop] = []
+            populations[pop].append(ind)
+    
+    return populations
+
+def get_chromosomes():
+    chromosomes = []
+    with open(config["chromosome_file"], 'r') as f:
+        for line in f:
+            line = line.strip()
+            chromosomes.append(line)
+
+    return chromosomes
+
+rule all:
+    input:
+        expand("results/{population}/phased.vcf.gz", population = get_individuals()),
+        expand("results/{population}/phased.vcf.gz.csi", population = get_individuals())
+
+rule chromosome_vcf:
+    input:
+        config["vcf_file"],
+        config["populations_file"]
+    output:
+        "results/{population}/vcf/{chromosome}.vcf.gz"
+    log:
+        "log/{population}/vcf/{chromosome}.log"
+    run:
+        individuals = ','.join(get_individuals()[wildcards.population])
+        shell(f"bcftools view -s {individuals} -r {wildcards.chromosome} -Oz -o {output} {input} > {log} 2>&1 && bcftools index {output} > {log} 2>&1")
+
+
+rule phase:
+    input:
+        "results/{population}/vcf/{chromosome}.vcf.gz",
+        expand("{gmap_dir}/{{chromosome}}.gmap", gmap_dir = config['gmap_dir'])
+    output:
+        "results/{population}/phased_bcf/{chromosome}.bcf"
+    log:
+        "log/{population}/phased_bcf/{chromosome}.log"
+    threads: 8
+    shell:
+        """SHAPEIT5_phase_common --input {input[0]} \
+            --region {wildcards.chromosome} \
+            --map {input[1]} \
+            --output {output[0]} \
+            --thread {threads} > {log} 2>&1"""
+
+rule convert_output:
+    input:
+        "results/{population}/phased_bcf/{chromosome}.bcf"
+    output:
+        "results/{population}/phased_vcf/{chromosome}.vcf.gz",
+        "results/{population}/phased_vcf/{chromosome}.vcf.gz.csi"
+    log:
+        "log/{population}/phased_vcf/{chromosome}.log"
+    shell:
+        "bcftools view -Oz -o {output[0]} {input} && bcftools index {output[0]}"
+
+rule combine_chrom:
+    input:
+        expand("results/{population}/phased_vcf/{chromosome}.vcf.gz", chromosome=get_chromosomes(), population=get_individuals())
+    output:
+        "results/{population}/phased.vcf.gz",
+        "results/{population}/phased.vcf.gz.csi"
+    log:
+        "log/{population}/combine_chrom.log"
+    shell:
+        "bcftools concat --write-index -o {output[0]} -Oz {input}"
