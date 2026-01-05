@@ -1,4 +1,5 @@
 .snakemake
 results
 log
-config.yaml
+resources
+config.yml
