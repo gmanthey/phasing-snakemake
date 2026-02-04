@@ -2,3 +2,4 @@ vcf_file: "/path/to/vcf.gz"
 populations_file: "resources/populations.txt"
 chromosome_file: "resources/chromosomes.txt"
 gmap_dir: "/path/to/gmap/dir"
+mu: 4.6e-9 # example for songbirds
