@@ -1,17 +1,26 @@
 import os
 import pandas as pd
 
-localrules: all, chromosome_vcf
+localrules: all, chromosome_vcf, index_vcf, individual_vcf
 configfile: "config.yml"
 
 def get_individuals():
     populations = {}
     with open(config['populations_file']) as f:
         for line in f:
-            pop, ind = line.strip().split()
+            pop, ind = line.strip().split(maxsplit=1)
             if pop not in populations:
                 populations[pop] = []
-            populations[pop].append(ind)
+
+            ind = ind.split()
+
+            if len(ind) == 1:
+                ind = ind[0]
+                sequencing = "default"
+            elif len(ind) == 2:
+                ind, sequencing = ind
+
+            populations[pop].append((ind, sequencing))
     
     return populations
 
@@ -29,22 +38,80 @@ rule all:
         expand("results/{population}/phased.vcf.gz", population = get_individuals()),
         expand("results/{population}/phased.vcf.gz.csi", population = get_individuals())
 
-rule chromosome_vcf:
+rule individual_vcf:
     input:
         config["vcf_file"],
         config["populations_file"]
     output:
+        "results/vcf_individual/{individual}.vcf.gz",
+    log:
+        "log/vcf_individual/{individual}.log"
+    shell:
+        """bcftools view -s {wildcards.individual} -W -Oz -o {output[0]} {input} > {log} 2>&1"""
+
+rule phase_default:
+    input:
+        "results/vcf_individual/{individual}.vcf.gz",
+        "results/vcf_individual/{individual}.vcf.gz.csi",
+        f"{config['bam_dir']}/{{individual}}.bam",
+        f"{config['bam_dir']}/{{individual}}.bam.bai",
+        config["reference_genome"]
+    output:
+        "results/phased_default/{individual}.vcf.gz",
+    log:
+        "log/phased_default/{individual}.log"
+    shell:
+        """whatshap phase -o {output} --ignore-read-groups --reference {input[4]} {input[0]} {input[2]} > {log} 2>&1"""
+
+rule phase_10x_extractHAIRS:
+    input:
+        "results/vcf_individual/{individual}.vcf.gz",
+        "results/vcf_individual/{individual}.vcf.gz.csi",
+        f"{config['bam_dir']}/{{individual}}.bam",
+        f"{config['bam_dir']}/{{individual}}.bam.bai",
+        config["reference_genome"]
+    output:
+        temp("results/phased_10x/{individual}.unlinked_fragments"),
+        "results/phased_10x/{individual}.fragments"
+    log:
+        "log/phased_10x_hairs/{individual}.log"
+    shell:
+        """extractHAIRS --10X 1 --bam {input[2]} --VCF {input[0]} --out {output[0]} > {log} 2>&1 && \
+           python3 utilities/LinkFragments.py --bam {input[2]} --VCF {input[0]} --fragments {output[0]} --out {output[1]}"""
+
+rule phase_10x_hapcut2:
+    input:
+        "results/vcf_individual/{individual}.vcf.gz",
+        "results/vcf_individual/{individual}.vcf.gz.csi",
+        "results/phased_10x/{individual}.fragments"
+    output:
+        "results/phased_10x/{individual}.vcf.gz",
+    log:
+        "log/phased_10x_hapcut2/{individual}.log"
+    shell:
+        """HapCut2 -nf 1 --fragments {input[2]} --VCF {input[0]} --output {output[0]} > {log} 2>&1"""
+
+def get_phased_vcfs(wildcards):
+    return [f"results/phased_{sequencing}/{individual}.vcf.gz" for individual, sequencing in get_individuals()[wildcards.population]]
+
+def get_phased_vcf_indices(wildcards):
+    return [f"results/phased_{sequencing}/{individual}.vcf.gz.csi" for individual, sequencing in get_individuals()[wildcards.population]]
+
+rule chromosome_vcf:
+    input:
+        vcf=get_phased_vcfs,
+        index=get_phased_vcf_indices
+    output:
         "results/{population}/vcf/{chromosome}.vcf.gz"
     log:
         "log/{population}/vcf/{chromosome}.log"
-    run:
-        individuals = ','.join(get_individuals()[wildcards.population])
-        shell(f"bcftools view -s {individuals} -r {wildcards.chromosome} -Oz -o {output} {input} > {log} 2>&1 && bcftools index {output} > {log} 2>&1")
+    shell:
+        """bcftools merge -r {wildcards.chromosome} -Oz -o {output} {input.vcf} > {log} 2>&1"""
 
-
-rule phase:
+rule phase_shapeit4:
     input:
         "results/{population}/vcf/{chromosome}.vcf.gz",
+        "results/{population}/vcf/{chromosome}.vcf.gz.csi",
         expand("{gmap_dir}/{{chromosome}}.gmap", gmap_dir = config['gmap_dir'])
     output:
         "results/{population}/phased_bcf/{chromosome}.bcf"
@@ -52,10 +119,11 @@ rule phase:
         "log/{population}/phased_bcf/{chromosome}.log"
     threads: 8
     shell:
-        """SHAPEIT5_phase_common --input {input[0]} \
+        """shapeit4 --input {input[0]} \
             --region {wildcards.chromosome} \
-            --map {input[1]} \
+            --map {input[2]} \
             --output {output[0]} \
+            --use-PS 0.0001 \
             --thread {threads} > {log} 2>&1"""
 
 rule convert_output:
@@ -63,19 +131,29 @@ rule convert_output:
         "results/{population}/phased_bcf/{chromosome}.bcf"
     output:
         "results/{population}/phased_vcf/{chromosome}.vcf.gz",
-        "results/{population}/phased_vcf/{chromosome}.vcf.gz.csi"
     log:
         "log/{population}/phased_vcf/{chromosome}.log"
     shell:
-        "bcftools view -Oz -o {output[0]} {input} && bcftools index {output[0]}"
+        "bcftools view -Oz -o {output[0]} {input}"
 
 rule combine_chrom:
     input:
-        expand("results/{population}/phased_vcf/{chromosome}.vcf.gz", chromosome=get_chromosomes(), population=get_individuals())
+        vcf=expand("results/{population}/phased_vcf/{chromosome}.vcf.gz", chromosome=get_chromosomes(), population=get_individuals()),
+        index=expand("results/{population}/phased_vcf/{chromosome}.vcf.gz.csi", chromosome=get_chromosomes(), population=get_individuals())
     output:
         "results/{population}/phased.vcf.gz",
         "results/{population}/phased.vcf.gz.csi"
     log:
         "log/{population}/combine_chrom.log"
     shell:
-        "bcftools concat --write-index -o {output[0]} -Oz {input}"
+        "bcftools concat --write-index -o {output[0]} -Oz {input.vcf} > {log} 2>&1"
+
+rule index_vcf:
+    input:
+        "results/{prefix}.vcf.gz"
+    output:
+        "results/{prefix}.vcf.gz.csi"
+    log:
+        "log/{prefix}.index.log"
+    shell:
+        "bcftools index {input} > {log} 2>&1"

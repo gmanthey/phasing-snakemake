@@ -5,9 +5,14 @@ channels:
   - nodefaults
 dependencies:
   - python
-  - bioconda::snakemake
   - bioconda::bcftools
-  - bioconda::snakemake-executor-plugin-slurm
-  - pandas
-  - shapeit5
+  - shapeit4
   - bcftools
+  - whatshap
+  - hapcut2
+  - pip
+  - pip:
+    - snakemake
+    - snakemake-executor-plugin-slurm
+    - pandas
+    - pysam
