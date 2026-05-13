@@ -112,19 +112,19 @@ rule phase_shapeit4:
     input:
         "results/{population}/vcf/{chromosome}.vcf.gz",
         "results/{population}/vcf/{chromosome}.vcf.gz.csi",
-        expand("{gmap_dir}/{{chromosome}}.gmap", gmap_dir = config['gmap_dir'])
+        expand("{gmap_dir}/{{chromosome}}.gmap", gmap_dir = config['gmap_dir']) if config['gmap_dir'] else []
     output:
         "results/{population}/phased_bcf/{chromosome}.bcf"
     log:
         "log/{population}/phased_bcf/{chromosome}.log"
     threads: 8
-    shell:
-        """shapeit4 --input {input[0]} \
+    run:
+        shell(f"""shapeit4 --input {input[0]} \
             --region {wildcards.chromosome} \
-            --map {input[2]} \
+            {'--map ' + input[2] if config['gmap_dir'] else ''} \
             --output {output[0]} \
             --use-PS 0.0001 \
-            --thread {threads} > {log} 2>&1"""
+            --thread {threads} > {log} 2>&1""")
 
 rule convert_output:
     input:
