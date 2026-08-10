@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 
-localrules: all, chromosome_vcf, index_vcf, individual_vcf
+localrules: all
 configfile: "config.yml"
 
 def get_individuals():
@@ -41,13 +41,24 @@ rule all:
 rule individual_vcf:
     input:
         config["vcf_file"],
-        config["populations_file"]
+    output:
+        "results/vcf_individual/{individual}.vcf",
+    log:
+        "log/vcf_individual/{individual}.log"
+    threads: 2
+    shell:
+        """bcftools view --max-alleles 2 --threads {threads} -U -s {wildcards.individual} -Ov -o {output[0]} {input} > {log} 2>&1"""
+
+rule individual_vcf_gzip:
+    input:
+        config["vcf_file"],
     output:
         "results/vcf_individual/{individual}.vcf.gz",
     log:
         "log/vcf_individual/{individual}.log"
+    threads: 2
     shell:
-        """bcftools view -s {wildcards.individual} -W -Oz -o {output[0]} {input} > {log} 2>&1"""
+        """bcftools view --max-alleles 2 --threads {threads} -U -s {wildcards.individual} -Oz -o {output[0]} {input} > {log} 2>&1"""
 
 rule phase_default:
     input:
@@ -65,8 +76,7 @@ rule phase_default:
 
 rule phase_10x_extractHAIRS:
     input:
-        "results/vcf_individual/{individual}.vcf.gz",
-        "results/vcf_individual/{individual}.vcf.gz.csi",
+        "results/vcf_individual/{individual}.vcf",
         f"{config['bam_dir']}/{{individual}}.bam",
         f"{config['bam_dir']}/{{individual}}.bam.bai",
         config["reference_genome"]
@@ -76,20 +86,32 @@ rule phase_10x_extractHAIRS:
     log:
         "log/phased_10x_hairs/{individual}.log"
     shell:
-        """extractHAIRS --10X 1 --bam {input[2]} --VCF {input[0]} --out {output[0]} > {log} 2>&1 && \
-           python3 utilities/LinkFragments.py --bam {input[2]} --VCF {input[0]} --fragments {output[0]} --out {output[1]}"""
+        """extractHAIRS --10X 1 --bam {input[1]} --VCF {input[0]} --out {output[0]} > {log} 2>&1 && \
+           python3 utilities/LinkFragments.py --bam {input[1]} --VCF {input[0]} --fragments {output[0]} --out {output[1]}"""
 
 rule phase_10x_hapcut2:
     input:
-        "results/vcf_individual/{individual}.vcf.gz",
-        "results/vcf_individual/{individual}.vcf.gz.csi",
+        "results/vcf_individual/{individual}.vcf",
         "results/phased_10x/{individual}.fragments"
     output:
-        "results/phased_10x/{individual}.vcf.gz",
+        "results/phased_10x/{individual}",
+        temp("results/phased_10x/{individual}.phased.VCF")
     log:
         "log/phased_10x_hapcut2/{individual}.log"
+    resources:
+        mem="100G"
     shell:
-        """HapCut2 -nf 1 --fragments {input[2]} --VCF {input[0]} --output {output[0]} > {log} 2>&1"""
+        """hapcut2 --nf 1 --fragments {input[1]} --VCF {input[0]} --output {output[0]} > {log} 2>&1"""
+
+rule gzip_vcf:
+    input:
+        "results/phased_10x/{prefix}.phased.VCF"
+    output:
+        "results/phased_10x/{prefix}.vcf.gz"
+    resources:
+        mem="10G"
+    shell:
+        "bcftools view -Oz -o {output} {input}"
 
 def get_phased_vcfs(wildcards):
     return [f"results/phased_{sequencing}/{individual}.vcf.gz" for individual, sequencing in get_individuals()[wildcards.population]]
@@ -105,8 +127,9 @@ rule chromosome_vcf:
         "results/{population}/vcf/{chromosome}.vcf.gz"
     log:
         "log/{population}/vcf/{chromosome}.log"
+    threads: 8
     shell:
-        """bcftools merge -r {wildcards.chromosome} -Oz -o {output} {input.vcf} > {log} 2>&1"""
+        """bcftools merge --threads {threads} -r {wildcards.chromosome} -Oz -o {output} {input.vcf} > {log} 2>&1"""
 
 rule phase_shapeit4:
     input:
@@ -118,6 +141,8 @@ rule phase_shapeit4:
     log:
         "log/{population}/phased_bcf/{chromosome}.log"
     threads: 8
+    resources:
+        mem="100G"
     run:
         shell(f"""shapeit4 --input {input[0]} \
             --region {wildcards.chromosome} \
@@ -133,8 +158,9 @@ rule convert_output:
         "results/{population}/phased_vcf/{chromosome}.vcf.gz",
     log:
         "log/{population}/phased_vcf/{chromosome}.log"
+    threads: 8
     shell:
-        "bcftools view -Oz -o {output[0]} {input}"
+        "bcftools view --threads {threads} -Oz -o {output[0]} {input}"
 
 rule combine_chrom:
     input:
@@ -142,11 +168,11 @@ rule combine_chrom:
         index=expand("results/{population}/phased_vcf/{chromosome}.vcf.gz.csi", chromosome=get_chromosomes(), population=get_individuals())
     output:
         "results/{population}/phased.vcf.gz",
-        "results/{population}/phased.vcf.gz.csi"
     log:
         "log/{population}/combine_chrom.log"
+    threads: 8
     shell:
-        "bcftools concat --write-index -o {output[0]} -Oz {input.vcf} > {log} 2>&1"
+        "bcftools concat --threads {threads} -o {output[0]} -Oz {input.vcf} > {log} 2>&1"
 
 rule index_vcf:
     input:
@@ -155,5 +181,8 @@ rule index_vcf:
         "results/{prefix}.vcf.gz.csi"
     log:
         "log/{prefix}.index.log"
+    threads: 8
     shell:
-        "bcftools index {input} > {log} 2>&1"
+        "bcftools index --threads {threads} {input} > {log} 2>&1"
+
+
